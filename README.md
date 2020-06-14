@@ -18,6 +18,14 @@
     - [Map](#map)
     - [Blocks](#blocks)
     - [Procs vs Blocks](#procs-vs-blocks)
+    - [Currying](#currying)
+    - [Functional Composition](#functional-composition)
+    - [Functional Thinking](#functional-thinking)
+  - [Metaprogramming](#metaprogramming)
+    - [Defining Dinosaurs](#defining-dinosaurs)
+    - [Simple Matching](#simple-matching)
+    - [Complex Matching](#complex-matching)
+    - [Matching All Attributes](#matching-all-attributes)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1306,3 +1314,967 @@ Use block when calling a method, and expecting the block code to be run as part 
 Use lambdas when want to store a block of code and use it later. Often used when need to delay execution until later.
 
 Use `&` (aka `to_proc`) together with symbl when want to call a single method on a list of objects.
+
+### Currying
+
+aka *Partial application* - call a proc with some arguments now, then call it with rest of the arguments later.
+
+Example:
+
+```ruby
+# proc that multiplies two numbers together
+mult = -> x, y { x * y }
+
+# call proc
+mult[2, 3] # 6
+
+# send message `curry` with first of the two numbers
+# use square brackets when calling curry to let Ruby know arguments are for original proc, rather than arguments to curry
+double = mult.curry[2] # returns new Proc object
+
+# call new proc with second argument
+# will always use original argument that was given (2) and passes it in as first argument to original proc
+double[2] # 4
+double[4] # 8
+```
+
+Practical example - e-commerce platform, want to run some promotions:
+
+```ruby
+class Promotion
+  # `calculator` is a proc
+  def initialize(description, calculator)
+    @description = description
+    @calculator = calculator
+  end
+
+  def apply(total)
+    total - @calculator[total]
+  end
+end
+
+# Usage
+discount = Promotion.new(
+  "15% off everything",
+  -> total { total * 0.15 }
+)
+
+# We want many different kinds of promotions, eg:
+ten_pc = Promotion.new(
+  "10% if you spend over $50",
+  -> total { total > 50 ? total * 0.1 : 0 }
+)
+
+ten_pc.apply(45) # 45
+ten_pc.apply(100) # 90
+
+# Another promotion
+fifteen_pc = Promotion.new(
+  "15% if you spend over $100",
+  -> total { total > 100 ? total * 0.15 : 0}
+)
+
+fifteen_pc.apply(50) # 50
+fifteen_pc.apply(150) # 127.50
+```
+
+Notice that the two different `calculators` (as stabby lambdas in above code sample) are very similar:
+
+```ruby
+-> total { total > 50 ? total * 0.1 : 0 }
+-> total { total > 100 ? total * 0.15 : 0}
+```
+
+Remove dupe code by creating more general calculator, then curry it with desired values:
+
+```ruby
+# a general calculator
+calc = -> threshold, discount, total do
+  total > threshold ? total * discount : 0
+end
+
+# create more specific calculators with partial application
+ten_pc_calc = calc.curry[50, 0.1]
+fifteen_oc_calc = calc.curry[100, 0.15]
+
+# use the curried calculators
+ten_pc_calc[45] # 0
+ten_pc_calc[100] # 10.0
+fifteen_pc_calc[150] # 22.5
+
+# use the curried procs when creating promotions
+# Promotion class doesn't care if `calculator` is a curried Proc or regular proc
+ten_pc = Promotion.new(
+  "10% if you spend over $50",
+  ten_pc_calc
+)
+ten_pc.apply(100) # 90
+
+fifteen_pc = Promotion.new(
+  "15% if you spend over $100",
+  fifteen_pc_calc
+)
+fifteen_pc.apply(150) # 127.5
+```
+
+**Advantages of currying**
+
+1. Remove code duplication.
+2. Write general functions, then create more specialized functions from these for business domain.
+
+### Functional Composition
+
+aka joining functions together
+
+eg: e-commerce company wants reports on how well products are selling, suppose you have products pulled from db, each having some attributes.
+
+Will use `inject` method from `Enumerable` - takes a single parameter representing the initial value, and a block with two parameters - first param is result of last time block was run (or initial value when it first runs) - used to keep running total. Second parameter gets set to each item in the enumerable collection. Block is run once for each product.
+
+```ruby
+products.sample # <struct Product price-10, rating=1, color=:green, sales=2251>
+
+# Report #1: Calculate average sale price for all products
+class Report
+  def initialize(products)
+    @products = products
+  end
+
+  def run
+    # calculate total value of all sales
+    money_taken = @products.inject(0) do |total, product|
+      (product.price * product.sales) + total
+    end
+
+    # calculate number of products sold
+    total_sales = @products.inject(0) do |total, product|
+      product.sales + total
+    end
+
+    # calculate average selling price
+    money_taken / total_sales
+  end
+end
+
+# Usage
+Report.new(products).run # 42
+```
+
+New requirements - sales promotion on red products - new report to show average price of red things sold, and total money taken on all red products.
+
+Modify report class for new requirement by adding parameter to `run` method:
+
+```ruby
+class Report
+  def initialize(products)
+    @products = products
+  end
+
+  def run(red_only: false)
+    # Determine what selection of products the report will run for
+    selection = @products
+    if red_only
+      selection = selection.select { |product| product.color == :red }
+    end
+
+    # calculate total value of all sales
+    money_taken = @products.inject(0) do |total, product|
+      (product.price * product.sales) + total
+    end
+
+    # calculate number of products sold
+    total_sales = @products.inject(0) do |total, product|
+      product.sales + total
+    end
+
+    # return average selling price and money taken
+    {
+      average_sales_price: money_taken / total_sales,
+      money_taken: money_taken
+    }
+  end
+end
+
+# Usage
+Reports.new(products).run # {:average_sales_price=>42, :money_taken=>5172310}
+Reports.new(products).run(red_only: true) # {:average_sales_price=>39, :money_taken=>1700340}
+```
+
+New requirement: Report on top 3 selling products - add new method `top_selling` to `Report` class:
+
+```ruby
+class Report
+  def initialize(products)
+    @products = products
+  end
+
+  def run(red_only: false)
+    ...
+  end
+
+  def top_selling
+    @products.sort_by(&:sales).last(3)
+  end
+end
+```
+
+New requirement: Report on top 3 selling *red* products:
+
+```ruby
+class Report
+  def initialize(products)
+    @products = products
+  end
+
+  def run(red_only: false)
+    selection = select_products(red_only)
+    ...
+  end
+
+  def top_selling(red_only: false)
+    selection = select_products(red_only)
+    selection.sort_by(&:sales).last(3)
+  end
+
+  def select_products(red_only)
+    selection = @products
+    if red_only
+      selection = selection.select { |product| product.color == :red }
+    end
+
+    selection
+  end
+end
+```
+
+Report class is getting too long and harder to maintain as new report requirements come in - too many conditional flags and logic.
+
+Use functional approach to make improvements - eg: lambda for average sale price, break it down into smaller functions:
+
+```ruby
+require "./products"
+
+# use to_proc trick with add symbol
+sum = -> list { list.inject(&:a) }
+
+sales_value = -> products do
+  product_revenue = products.map { |product| product.sales * product.price }
+  sum[product_revenue]
+end
+
+total_sales = -> products { sum[products.map(&:sales)] }
+
+avg_sale_price = -> products { sales_value[products] / total_sales[products] }
+
+# Usage
+avg_sale_price[PRODUCTS] # => 44
+
+# Red only
+red = -> products { products.select { |p| p.color == :red} }
+
+# Make output of `red` lambda get used as input for `avg_sale_price` lambda
+class FunctionalReport
+  # fns is list of functions that will generate each stage of the report
+  def initialize(products, *fns)
+    @products = products
+    @fns = fns
+  end
+
+  # run all the functions in sequence
+  def run
+    @fns.inject(@products) do |last_result, fn|
+    fn[last_result]
+  end
+end
+
+# Usage
+FunctionalReport.new(PRODUCTS, avg_sale_price).run # 44
+FunctionalReport.new(PRODUCTS, red, avg_sale_price).run # 48
+
+green = -> products { products.select { |p| p.color == :green } }
+high_rating = -> products { products.select { |p| p.rating >= 3 } }
+
+FunctionalReport.new(PRODUCTS, green, high_rating, total_sales).run # 16089
+```
+
+There is some code duplication between lambdas to find red or green products:
+
+```ruby
+red = -> products { products.select { |p| p.color == :red} }
+green = -> products { products.select { |p| p.color == :green } }
+```
+
+To remove dupe code, write generic function to filter products by some attribute, then use curry to create specific queries:
+
+```ruby
+# attr      Attribute to filter by
+# op        Operation to be applied
+# value     Value to compare each product to
+# products  List of products (IMPORANT: This must be last argument to support currying later)
+by_attribute = -> attr, op, value, products do
+  # Use select as always, get attribute of interest for each product,
+  # Call operation on the product by sending it as a message to that attribute,
+  # passing in given value.
+  products.select { |p| p[attr].send(op, value) }
+end
+
+# Create a specialized function to search by color,
+# by partially applying above lambda
+by_color = by_attribute.curry[:color, :==]
+
+# Specialize by looking for blue products
+blue = by_color.curry[:blue]
+
+# Sample usage
+blue[PRODUCTS].take(3)
+# [<struct Product price=10, rating=3, color=:blue, sales=1122>, ... ]
+
+# Maximum rating
+by_max_rating = by_attribute.curry[:rating, :<]
+low_rating = by_max_rating.curry[3]
+
+# Combine into final report: Top 3 lowest rated blue products
+FunctionalReport.new(PRODUCTS, blue, low_rating).run.take(3)
+```
+
+Above is very clever but should Ruby code be written like this?
+
+### Functional Thinking
+
+Code in previous section is not really idiomatic Ruby, especially currying and composing lambdas. For that recommend functional language.
+
+Recommended functional techniques include:
+- map, select, inject, etc
+- blocks for processing lists of data
+- lambdas when need to run some code later
+
+**Revisit Composition**
+
+Replace lambdas with regular objects:
+
+```Ruby
+require './products'
+
+# red = -> products { products.select { |p| p.color == :red }}
+
+class RedFilter
+  def apply(products)
+    products.select { |p| p.color == :red }
+  end
+end
+
+# Usage
+RedFilter.new.apply(PRODUCTS).take(3)
+```
+
+Even more flexible - filter by any color:
+
+```ruby
+class ColorFilter
+  attr_reader :color
+
+  def initialize(color)
+    @color = color
+  end
+
+  def apply(products)
+    products.select { |p| p.color == @color }
+  end
+
+  def to_s
+    "Filtering for #{self.color} products"
+  end
+end
+
+# Usage
+filter = ColorFilter.new(:blue)
+filter.apply(PRODUCTS).take(3)
+```
+
+## Metaprogramming
+
+In the code below, `has_many` and `belongs_to` are method calls that will generate new Ruby code. Specifically, they add extra methods to the active record model to access other associated collections and classes, i.e. they're not regular methods, they *change the definition of the class*.
+
+`has_many` and `belongs_to` are class methods - get evaluated when class is defined, not when its instantiated or later by sending a message.
+
+```ruby
+class Post < AciveRecord::Base
+  has_many :comments
+  belongs_to :user
+end
+```
+
+Meta programming often involves adding/modifying functionality on a class - does so at *run time*. This feature allows a framework like Rails to be written with Ruby.
+
+To demonstrate meta programming - will build online dating platform for dinosaurs.
+
+### Defining Dinosaurs
+
+Match dinosaurs with similar interests. Start with [dinosaur data](dinosaurs/data.rb) - one json object per species:
+
+```ruby
+# dinosaurs/data.rb
+TREX_DATA = {
+  name: 'Tyrannosaurus Rex',
+  order: 'Saurischia',
+  suborder: 'Theropoda',
+  family: 'Tyrannosauridae',
+  diet: "carnivore",
+  period: "Late Cretaceous",
+  length: 4500,
+  weight: 6400,
+  first_discovered: 1874,
+  hobbies: [
+    "Scaring children",
+    "Battling triceritops",
+    "Bowling"
+  ]
+}
+
+PTERODACTYL_DATA = {
+  name: 'Ptyerodactyl',
+  order: 'Pterosauria',
+  suborder: 'Pterodactyloidea',
+  family: 'Pterodactylidae',
+  diet: "carnivore",
+  period: "Late Jurassic",
+  wingspan: 1040,
+  first_discovered: 1784
+}
+...
+```
+
+Naive way would be to create a class for each species, eg:
+
+```ruby
+class TyrannosaurusRex
+  attr_reader :period, :size, :weight, :hobbies
+
+  def initialize(data)
+    @period = data[:period]
+    @size = data[:size]
+    @weight = data[:weight]
+    @hobbies = data[:hobbies]
+  end
+end
+
+trex = TyrannosaurusRex.new(TREX_DATA)
+```
+
+Doesn't scale for large number of species, 300+
+
+Could have general Dinosaur superclass, then specific subclasses, but also doesn't work because care about different data for different species. Eg - only some species have `wingspan`. Also properties in json will keep changing as platform developers.
+
+Desired solution: Dynanically create attribute methods depending on the data available for each dinosaur.
+
+Methods can be defined at run time using `define_method` method, simple eg - note it must be class method, the new method will ba added for all instances of the class.
+
+```ruby
+class Dinosaur
+  def self.add_method(method_name)
+    # pass in method_name, and a block to define the new methods behaviour
+    define_method(method_name) do
+      "this method was dynamically defined"
+    end
+  end
+end
+
+# Usage
+d = Dinosuar.new
+Dinosaur.add_method(:roar) # "this method was dynamically defined"
+```
+
+`define_method` is private, can't call it outside a class method.
+
+What we really want is to add an `attr_reader` dynamically, use `define_method` for this, wrapped in a new class method `add_attribute`:
+
+```ruby
+require "./data"
+
+class Dinosaur
+  # name: name of attribute
+  # value: value to be returned when attribute is read
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  # read in each json attribute, creating an attribute for it
+  def initialize(data)
+    data.each do |key,value|
+      self.class.add_attribute(key, value)
+    end
+  end
+end
+
+# Usage
+d = Dinosaur.new(TREX_DATA)
+d.name # "Tyrannosaurus Tex"
+d.length # 4500
+d.hobbies # ["Scaring children", "Battling triceritops", "Bowling"]
+```
+
+### Simple Matching
+
+Will match dinosaurs based on a collection of attributes such as common hobbies, suborder, height.
+
+Keep it flexible by chaining together primitive matches.
+
+Naive approach is to declare a match method for every attribute we're interested in:
+
+```ruby
+class Diplodocus < Dinosaur
+  def match_diet(diet)
+    self.diet == diet
+  end
+
+  def match_suborder(suborder)
+    self.suborder == suborder
+  end
+end
+```
+
+`match_diet` and `match_suborder` above are nearly identical, only difference is attribute being compared.
+
+Desired - tell Ruby the attribute, and have it generate the repetitive part of the code.
+
+Recall that classes are also objects -> they can have methods and attributes of their own.
+
+First attempt - `match_on` will try to call a method on the class
+
+```ruby
+class Diplodocus < Dinosaur
+  match_on :diet
+  match_on :suborder
+end
+```
+
+`match_on` method is common to all Dinosaurs, it's a class method -> start with `self.`
+
+```ruby
+require "./data"
+
+class Dinosaur
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  def self.match_on(attr_name)
+    method_name = "match_#{attr_name}"
+    define_method(method_name) do |value|
+      # retrieve an attribute, and compare to value passed in
+      # i.e. "call this method whose name matches a value stored in this variable"
+      # eg: if attr_name is diet, invoke the `diet` method,
+      # which got defined dynamically by self.add_attribute above
+      attr = self.send(attr_name)
+      attr == value
+    end
+  end
+
+  def initialize(data)
+    data.each do |key,value|
+      self.class.add_attribute(key, value)
+    end
+  end
+end
+
+# Usage
+d = Diplodocus.new(DIPLODOCUS_DATA)
+d.match_diet("herbivore") # true
+d.match_suborder("Theropoda") # false
+```
+
+Using class methods to generate code, now can easily add another dinosaur subclass to match on `suborder`. Notice the only code seen is what we want to achieve, not steps how to do it:
+
+```ruby
+class TyrannosaurusTex < Dinosaur
+  match_on :suborder
+end
+
+# Usage
+trex = TyrannosaurusTex.new(TREX_DATA)
+trex.match_suborder("Theropoda") # true
+```
+
+This is start of DSL (domain specific languages).
+
+### Complex Matching
+
+eg - want to match on "at least one hobby in common", simple `match_on` from previous section only does equality.
+
+```ruby
+class TyrannosaurusTex < Dinosaur
+  match_on :suborder
+  match_on :hobbies # not quite...
+end
+
+# Usage (not yet working)
+trex = TyrannosaurusTex.new(TREX_DATA)
+trex.match_hobbies(["Scaring children"]) # false
+```
+
+Modify matcher method to take optional block, and use it to perform matching. If no block given, then default to equivalence check:
+
+```ruby
+require './data'
+
+class Dinosaur
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  def self.match_on(attr_name, &block)
+    method_name = "match_#{attr_name}"
+    matcher = block || -> attr, value { attr == value }
+    define_method(method_name) do |value|
+      attr = send(attr_name)
+      matcher.call(attr, value)
+    end
+  end
+
+  def initialize(data)
+    data.each do |key, value|
+      self.class.add_attribute(key, value)
+    end
+  end
+end
+
+class TyrannosaurusTex < Dinosaur
+  match_on :suborder
+  match_on :hobbies do |our_hobbies, other_hobbies|
+    (our_hobbies & other_hobbies).any?
+  end
+end
+
+# Usage
+trex = TyrannosaurusTex.new(TREX_DATA)
+trex.match_hobbies(["Scaring children"]) # true
+```
+
+Further improvement - comparing two arrays if they have anything in common is useful - move it up to `Dinosaur` superclass:
+
+```ruby
+require './data'
+
+class Dinosaur
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  def self.match_on(attr_name, &block)
+    method_name = "match_#{attr_name}"
+    matcher = block || -> attr, value { attr == value }
+    define_method(method_name) do |value|
+      attr = send(attr_name)
+      matcher.call(attr, value)
+    end
+  end
+
+  def self.match_on_any(attr_name)
+    self.match_on(attr_name) do |ours, theirs|
+      (ours & theirs).any?
+    end
+  end
+
+  def initialize(data)
+    data.each do |key, value|
+      self.class.add_attribute(key, value)
+    end
+  end
+end
+
+# Now trex class can use `match_on_any` for hobbies
+class TyrannosaurusTex < Dinosaur
+  match_on :suborder
+  match_on_any :hobbies
+end
+
+# Usage
+trex = TyrannosaurusTex.new(TREX_DATA)
+trex.match_hobbies(["Scaring children"]) # true
+```
+
+Now that matcher accepts a block, can further enhance DSL with `match_on_at_least`:
+
+```ruby
+require './data'
+
+class Dinosaur
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  def self.match_on(attr_name, &block)
+    method_name = "match_#{attr_name}"
+    matcher = block || -> attr, value { attr == value }
+    define_method(method_name) do |value|
+      attr = send(attr_name)
+      matcher.call(attr, value)
+    end
+  end
+
+  def self.match_on_any(attr_name)
+    self.match_on(attr_name) do |ours, theirs|
+      (ours & theirs).any?
+    end
+  end
+
+  def self.match_on_at_least(attr_name, threshold)
+    self.match_on(attr_name) do |_, value|
+      value >= threshold
+    end
+  end
+
+  def initialize(data)
+    data.each do |key, value|
+      self.class.add_attribute(key, value)
+    end
+  end
+end
+
+class TyrannosaurusTex < Dinosaur
+  match_on :suborder
+  match_on_any :hobbies
+  match_on_at_least :length, 4000
+end
+
+# Usage
+trex = TyrannosaurusTex.new(TREX_DATA)
+trex.match_hobbies(["Scaring children"]) # true
+trex.match_length(4000) # true
+```
+
+### Matching All Attributes
+
+Determine if two dinosaurs are a good match comparing all attributes.
+
+Chnage true/false return of match to return a number such as `1` if its a good match, return higher number if its a better match. Return `0` if this attribute has no impact on match quality. Return `-1` if this would be a bad match.
+
+Make a few changes to common methods in `Dinosaur` superclass, adding ternary operator for return on matches. For `match_on_any`, return number of items that match.
+
+Also add `reject_if` (eg: herbivore may not want to be matched with a carnivore):
+
+```ruby
+require './data'
+
+class Dinosaur
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  def self.match_on(attr_name, &block)
+    method_name = "match_#{attr_name}"
+    matcher = block || -> attr, value { attr == value  ? 1 : 0 }
+    define_method(method_name) do |value|
+      attr = send(attr_name)
+      matcher.call(attr, value)
+    end
+  end
+
+  def self.match_on_any(attr_name)
+    self.match_on(attr_name) do |ours, theirs|
+      (ours & theirs).size
+    end
+  end
+
+  def self.match_on_at_least(attr_name, threshold)
+    self.match_on(attr_name) do |_, value|
+      value >= threshold ? 1 : 0
+    end
+  end
+
+  # takes in a hash of attribute names, and values to reject
+  def self.reject_if(paris)
+    pairs.each do |attr_name, reject|
+      self.match_on(attr_name) do |_, value|
+        reject == value ? -1 : 0
+      end
+    end
+  end
+
+  def initialize(data)
+    data.each do |key, value|
+      self.class.add_attribute(key, value)
+    end
+  end
+end
+
+# Usage
+class Diplodocus < Dinosaur
+  reject_if :diet => "carnivore"
+  match_on :suborder
+end
+
+d = Diplodocus.new(DIPLODOCUS_DATA)
+diet = d.match_diet("carnivore") # -1
+suborder = d.match_suborder("Sauropodomorpha") # 1
+diet + suborder # 0
+```
+
+Need to keep track of all the attributes any given dinosaur species is interested in. Use *class instance variable*. These variables are referenced from class methods rather than regular instance methods. This works because classes are also objects.
+
+```ruby
+require './data'
+
+class Dinosaur
+  def self.match_attributes
+    @match_attributes || []
+  end
+
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  def self.match_on(attr_name, &block)
+    method_name = "match_#{attr_name}"
+    matcher = block || -> attr, value { attr == value  ? 1 : 0 }
+    define_method(method_name) do |value|
+      attr = send(attr_name)
+      matcher.call(attr, value)
+    end
+
+    # keep track of attributes interested in for matching
+    @match_attributes = self.match_attributes << attr_name
+  end
+
+  def self.match_on_any(attr_name)
+    self.match_on(attr_name) do |ours, theirs|
+      (ours & theirs).size
+    end
+  end
+
+  def self.match_on_at_least(attr_name, threshold)
+    self.match_on(attr_name) do |_, value|
+      value >= threshold ? 1 : 0
+    end
+  end
+
+  # takes in a hash of attribute names, and values to reject
+  def self.reject_if(paris)
+    pairs.each do |attr_name, reject|
+      self.match_on(attr_name) do |_, value|
+        reject == value ? -1 : 0
+      end
+    end
+  end
+
+  def initialize(data)
+    data.each do |key, value|
+      self.class.add_attribute(key, value)
+    end
+  end
+end
+
+# Usage
+class Diplodocus < Dinosaur
+  match_on :diet
+  match_on :suborder
+end
+
+class TyrannosaurusTex < Dinosaur
+  match_on :hobbies
+end
+
+TyrannosaurusTex.match_attributes # [:hobbies]
+TyraDiplodocusnnosaurusTex.match_attributes # [:diet, :suborder]
+```
+
+Now wrap it all up in `match` method to get all attributes interested in and calculate match score:
+
+```ruby
+require './data'
+
+class Dinosaur
+  def self.match_attributes
+    @match_attributes || []
+  end
+
+  def self.add_attribute(name, value)
+    define_method(name) do
+      value
+    end
+  end
+
+  def self.match_on(attr_name, &block)
+    method_name = "match_#{attr_name}"
+    matcher = block || -> attr, value { attr == value  ? 1 : 0 }
+    define_method(method_name) do |value|
+      attr = send(attr_name)
+      matcher.call(attr, value)
+    end
+
+    # keep track of attributes interested in for matching
+    @match_attributes = self.match_attributes << attr_name
+  end
+
+  def self.match_on_any(attr_name)
+    self.match_on(attr_name) do |ours, theirs|
+      (ours & theirs).size
+    end
+  end
+
+  def self.match_on_at_least(attr_name, threshold)
+    self.match_on(attr_name) do |_, value|
+      value >= threshold ? 1 : 0
+    end
+  end
+
+  # takes in a hash of attribute names, and values to reject
+  def self.reject_if(paris)
+    pairs.each do |attr_name, reject|
+      self.match_on(attr_name) do |_, value|
+        reject == value ? -1 : 0
+      end
+    end
+  end
+
+  def initialize(data)
+    data.each do |key, value|
+      self.class.add_attribute(key, value)
+    end
+  end
+
+  def match(other)
+    attributes = self.class.match_attributes
+    attrributes.inject(0) do |score, attr|
+      match_method = "match_#{attr}"
+
+      # ensure `other` dinosaur has this attribute to compare to
+      if other.respond_to?(attr)
+        value = other.send(attr)
+        score += send(match_method, value)
+      else
+        score
+      end
+    end
+  end
+end
+
+# Usage
+class Diplodocus < Dinosaur
+  match_on :diet
+  match_on :suborder
+end
+
+class TyrannosaurusTex < Dinosaur
+  match_on :hobbies
+end
+
+trex = TyrannosaurusTex.new(TREX_DATA)
+diplo = Diplodocus.new(DIPLODOCUS_DATA)
+
+trex.match(diplo) # 1 (good match)
+diplo.match(trex) # -1 (not a good match)
+```
